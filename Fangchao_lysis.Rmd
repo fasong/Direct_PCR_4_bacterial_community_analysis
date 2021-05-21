@@ -1,0 +1,319 @@
+---
+title: "Fangchao_LysisComparisib"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+this was done in UNIX 
+
+
+Do I need to uzip raw files for cutadapt ?  I think I did.
+gunzip *
+
+
+ls -1 | grep "R1" > files_R1files
+awk ' FS="." {print$1"_cut."$2} '  files_R1files  >  files_R1files_cut
+paste files_R1files_cut files_R1files  > files_R1_command
+vi files_R1_command
+%s/^/\~\/.local\/bin\/cutadapt -g GGCCTACGGGAGGCAGCAG -o /g
+
+
+
+
+
+ls -1 | grep "R2" > files_R2files
+awk ' FS="." {print$1"_cut."$2} '  files_R2files  >  files_R2files_cut
+paste files_R2files_cut files_R2files  > files_R2_command
+vi files_R2_command
+
+%s/^/\~\/.local\/bin\/cutadapt -g CCGGACTACHVGGGTWTCTAAT -o /g.  # this was meesed up a bit and I didn't get the ~ 
+chmod +x files_R1_command
+
+
+Librarys to load
+========================================================
+```{r  packagestoload, cache=TRUE }
+library(reshape2)
+library(ggplot2)
+library(qiimer)
+library(vegan)
+library(shape)
+library(RColorBrewer)
+library(plyr)
+library(GUniFrac)
+library(ape)
+library(dendextend)
+library(ade4)
+library(geiger)
+library(gtools)
+library(phytools)
+library(devtools)
+library("Biostrings")
+library(DESeq2)     #see notes about install above
+library(phyloseq)  #had to install differently
+library(dada2)
+library(cowplot) # caused a weird dependency issue
+library(data.table)  #caused a weird dependency issue
+library(ampvis2)  #had to install differently
+library(ShortRead) #see notes about install above
+library(backports)
+library(dada2)
+library(genefilter)
+
+
+```
+
+
+
+```{r  loading data files,  cache = TRUE}
+# path = "/Users/jenniferkuehl/Documents/Projects/On_going/Amplicon/Fangchao_lysismethod/cut_files"
+path = "cut_file"
+fnFs <- sort(list.files(path, pattern="R1_001_cut.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="R2_001_cut.fastq", full.names = TRUE))
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+
+```
+
+
+
+
+
+```{r    filter read denoise, cache=TRUE}
+out_Fsonly <- filterAndTrim(fnFs, filtFs, truncLen=300,
+              maxN=0, maxEE=3, truncQ=2, 
+              compress=TRUE, multithread=TRUE )  
+not.lost <- file.exists(filtFs)
+filtFs <- filtFs[not.lost]   
+
+errF <- learnErrors(filtFs, multithread=TRUE)
+derepFs <- derepFastq(filtFs, verbose=TRUE) 
+dadaFs <- dada(derepFs, err=errF, multithread=TRUE) 
+```
+
+
+Start here.
+```{r  maketable and assigntax , cache=TRUE}
+Fonly = makeSequenceTable(dadaFs)
+Fonly.nochim <- removeBimeraDenovo(Fonly, method="consensus", multithread=TRUE, verbose=TRUE)
+sum(Fonly.nochim)/sum(Fonly)
+
+getN <- function(x) sum(getUniques(x))
+track_F <- cbind(out_Fsonly, sapply(dadaFs, getN), rowSums(Fonly.nochim))
+colnames(track_F) <- c("input", "filtered", "denoisedF", "nonchim")
+rownames(track_F) <- sample.names
+head(track_F)
+
+
+
+taxa2 <- assignTaxonomy(Fonly.nochim, "silva_nr_v132_train_set.fa.gz", multithread=TRUE)
+taxa2 <- addSpecies(taxa2, "silva_species_assignment_v132.fa.gz")
+```
+
+
+
+```{r}
+#because the ESv are names by sequence,  not always convenient,  except when merging dataframes.
+
+taxa3 = taxa2
+taxa3 = as.data.frame(taxa3)
+taxa3$Sequence = rownames(taxa3)
+taxa3 = taxa3[,c(8,1,2,3,4,5,6,7)]
+rownames(taxa3) = NULL
+newnames = paste0("esv", 1:length(rownames(taxa3)))
+rownames(taxa3) = newnames
+taxa4 = as.matrix(taxa3)
+
+colnames(Fonly.nochim) = newnames
+
+samples2.out <- rownames(Fonly.nochim)
+subject <- sapply(strsplit(samples2.out, "_"), `[`, 1)
+rownames(Fonly.nochim) = subject
+
+
+```
+
+```{r  phyloseq time ,  cache=TRUE}
+meta.txt = read.csv(file="P21P23MetaData20190829.csv", header=TRUE,stringsAsFactors=FALSE)
+row.names(meta.txt) = meta.txt$Sample_ID
+
+ps <- phyloseq(otu_table(Fonly.nochim, taxa_are_rows=FALSE), 
+               sample_data(meta.txt), 
+               tax_table(taxa4))
+ps.t = transform_sample_counts(ps, function(OTU) OTU/sum(OTU))   #2045 taxa
+flist<- filterfun(kOverA(5, 1e-04))
+ps.t.filtered = filter_taxa(ps.t, flist ,TRUE)  #194
+
+```
+
+
+
+```{r}
+tax_export = tax_table(ps)
+otu_export = otu_table(ps)
+sample_export = sample_data(ps)
+write.table(tax_export, file = "tax_export", sep = "\t",  quote = FALSE)
+write.table(otu_export, file = "otu_export", sep = "\t",  quote = FALSE)
+write.table(sample_export, file = "sample_export", sep = "\t",  quote = FALSE)
+
+```
+
+
+
+
+
+```{r   for ampvis graphs}
+
+otutable <- data.frame(OTU = colnames(phyloseq::otu_table(ps)@.Data),
+                       phyloseq::t(otu_table(ps))@.Data,    #transform since taxa were not in rows
+                       phyloseq::tax_table(ps)@.Data,
+                       check.names = FALSE
+                       )
+
+metadata <- data.frame(phyloseq::sample_data(ps), 
+                       check.names = FALSE
+                       )
+
+otunames= names(otutable)
+amp<- amp_load(otutable, metadata)
+```
+
+
+
+```{r}
+
+amp_yes = amp_subset_samples(amp, Rnase == "Y")
+GW822D_yes = amp_subset_samples(amp_no, Sample == "822D")
+GW823E_yes = amp_subset_samples(amp_no, Sample == "823E")
+GW822E_yes = amp_subset_samples(amp_no, Sample == "822E")
+GW821E_yes = amp_subset_samples(amp_no, Sample == "821E")
+ST20_yes = amp_subset_samples(amp_no, Sample == "ST20")
+ST80_yes = amp_subset_samples(amp_no, Sample == "ST80")
+
+amp_no = amp_subset_samples(amp, Method == "No")
+GW822D = amp_subset_samples(amp, Sample == "822D")
+GW823E = amp_subset_samples(amp, Sample == "823E")
+GW822E = amp_subset_samples(amp, Sample == "822E")
+GW821E = amp_subset_samples(amp, Sample == "821E")
+ST20 = amp_subset_samples(amp, Sample == "ST20")
+ST80 = amp_subset_samples(amp, Sample == "ST80")
+
+amp_no_noecoli <- amp_subset_taxa(amp_no, tax_vector="Escherichia/Shigella", remove=TRUE)
+
+# GW522D = amp_subset_samples(amp_no_noecoli, Environ_Sample == "GW522D")
+# GW523E = amp_subset_samples(amp_no_noecoli, Environ_Sample == "GW523E")
+# GW456 = amp_subset_samples(amp_no_noecoli, Environ_Sample == "GW456")
+# GW460 = amp_subset_samples(amp_no_noecoli, Environ_Sample == "GW460")
+
+
+
+amp_boxplot(GW522D,
+      group_by = "DNA_Extraction",
+      tax_aggregate = "Family",
+      tax_show = 25,
+      tax_add = "Phylum")  + 
+            scale_color_brewer(palette="Paired") + 
+            theme(text = element_text(size=20)) + 
+            labs(x = "ESV Taxon Assignment", y = "Relative Abundance(%)") + 
+            scale_fill_discrete("")  +
+  theme(axis.text.x = element_text(angle = 45, size=10, vjust = 1),
+        axis.text.y = element_text(size=8),
+        legend.position="right")
+
+amp_boxplot(GW523E,
+      group_by = "DNA_Extraction",
+      tax_aggregate = "Family",
+      tax_show = 25,
+      tax_add = "Phylum")  + 
+            scale_color_brewer(palette="Paired") + 
+            theme(text = element_text(size=20)) + 
+            labs(x = "ESV Taxon Assignment", y = "Relative Abundance(%)") + 
+            scale_fill_discrete("")  +
+  theme(axis.text.x = element_text(angle = 45, size=10, vjust = 1),
+        axis.text.y = element_text(size=8),
+        legend.position="right")
+
+amp_boxplot(GW456,
+      group_by = "DNA_Extraction",
+      tax_aggregate = "Family",
+      tax_show = 25,
+      tax_add = "Phylum")  + 
+            scale_color_brewer(palette="Paired") + 
+            theme(text = element_text(size=20)) + 
+            labs(x = "ESV Taxon Assignment", y = "Relative Abundance(%)") + 
+            scale_fill_discrete("")  +
+  theme(axis.text.x = element_text(angle = 45, size=10, vjust = 1),
+        axis.text.y = element_text(size=8),
+        legend.position="right")
+
+
+
+amp_boxplot(GW460,
+      group_by = "DNA_Extraction",
+      tax_aggregate = "Family",
+      tax_show = 25,
+      tax_add = "Phylum")  + 
+            scale_color_brewer(palette="Paired") + 
+            theme(text = element_text(size=20)) + 
+            labs(x = "ESV Taxon Assignment", y = "Relative Abundance(%)") + 
+            scale_fill_discrete("")  +
+  theme(axis.text.x = element_text(angle = 45, size=10, vjust = 1),
+        axis.text.y = element_text(size=8),
+        legend.position="right")
+
+
+
+
+amp_heatmap(amp,
+            group_by = "DNA_Extraction",
+            facet_by = "Environ_Sample",
+            tax_aggregate = "Family",
+            tax_add = "Phylum",
+            tax_show = 25,
+            color_vector = c("white", "darkred"),
+            plot_colorscale = "sqrt",
+            plot_values = FALSE) +
+  theme(axis.text.x = element_text(angle = 45, size=10, vjust = 1),
+        axis.text.y = element_text(size=8),
+        legend.position="right")
+
+```
+```{r}
+amp_glucose = amp_subset_samples(amp, Medium == "Glucose", Mix_Taxa == "No")
+amp_Xylose = amp_subset_samples(amp, Medium == "Xylose", Mix_Taxa == "No")
+
+
+amp_heatmap(amp_glucose,
+            group_by = "Method",
+            facet_by = "Environ_Sample",
+            tax_aggregate = "Phylum",
+            tax_add = "Species",
+            tax_show = 100,
+            color_vector = c("white", "darkred"),
+            plot_colorscale = "sqrt",
+            plot_values = TRUE) +
+  theme(axis.text.x = element_text(angle = 45, size=10, vjust = 1),
+        axis.text.y = element_text(size=8),
+        legend.position="right")
+
+
+amp_heatmap(amp_Xylose,
+            group_by = "Method",
+            facet_by = "Environ_Sample",
+            tax_aggregate = "Phylum",
+            tax_add = "Species",
+            tax_show = 100,
+            color_vector = c("white", "darkred"),
+            plot_colorscale = "sqrt",
+            plot_values = TRUE) +
+  theme(axis.text.x = element_text(angle = 45, size=10, vjust = 1),
+        axis.text.y = element_text(size=8),
+        legend.position="right")
+
+
+```
